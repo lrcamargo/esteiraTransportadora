@@ -1,0 +1,525 @@
+
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+// =====================================
+// WIFI DA ESTEIRA
+// =====================================
+const char* ssid = "Esteira_SENAI";
+const char* senha = "esteira123";
+
+ESP8266WebServer servidor(80);
+
+// =====================================
+// PINOS DA D1 WIFI
+// =====================================
+const int TRIG = 14;
+const int ECHO = 12;
+
+const int IN1 = 5;
+const int IN2 = 4;
+
+// =====================================
+// CONFIGURACOES
+// =====================================
+
+// Deixe false enquanto o L298N
+// estiver superaquecendo.
+const bool MOTOR_HABILITADO = true;
+
+// Distancias do ultrassonico
+const float LIMITE_ENTRADA = 10.0;
+const float LIMITE_SAIDA = 15.0;
+
+// Confirmacao por leituras validas
+const int CONFIRMA_ENTRADA = 1;
+const int CONFIRMA_SAIDA = 2;
+
+// =====================================
+// VARIAVEIS
+// =====================================
+unsigned long contador = 0;
+
+float distancia = -1;
+
+bool motorLigado = false;
+
+// Inicia bloqueado ate detectar
+// que nao existe objeto no sensor
+bool objetoPresente = true;
+
+int leiturasEntrada = 0;
+int leiturasSaida = 0;
+
+unsigned long ultimaLeitura = 0;
+
+// =====================================
+// MOTOR
+// =====================================
+void desligarMotor() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+
+  motorLigado = false;
+}
+
+void ligarMotor() {
+  if (!MOTOR_HABILITADO) {
+    servidor.send(
+      403,
+      "text/plain",
+      "Motor bloqueado por seguranca"
+    );
+    return;
+  }
+
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN1, HIGH);
+
+  motorLigado = true;
+
+  servidor.send(200, "text/plain", "Motor ligado");
+}
+
+void comandoDesligar() {
+  desligarMotor();
+
+  servidor.send(
+    200,
+    "text/plain",
+    "Motor desligado"
+  );
+}
+
+// =====================================
+// SENSOR ULTRASSONICO
+// =====================================
+float medirDistancia() {
+  digitalWrite(TRIG, LOW);
+  delayMicroseconds(3);
+
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+
+  unsigned long tempo =
+    pulseIn(ECHO, HIGH, 25000UL);
+
+  if (tempo == 0) {
+    return -1;
+  }
+
+  float cm = tempo * 0.0343 / 2.0;
+
+  if (cm < 2 || cm > 400) {
+    return -1;
+  }
+
+  return cm;
+}
+
+// =====================================
+// CONTADOR DE OBJETOS
+// =====================================
+void atualizarContador() {
+  if (millis() - ultimaLeitura < 100) {
+    return;
+  }
+
+  ultimaLeitura = millis();
+
+  distancia = medirDistancia();
+
+  // Leitura invalida nao conta
+  // e nao libera outro objeto
+  if (distancia < 0) {
+    leiturasEntrada = 0;
+    leiturasSaida = 0;
+    return;
+  }
+
+  // AGUARDANDO OBJETO SAIR
+  if (objetoPresente) {
+    leiturasEntrada = 0;
+
+    if (distancia >= LIMITE_SAIDA) {
+      leiturasSaida++;
+
+      if (leiturasSaida >= CONFIRMA_SAIDA) {
+        objetoPresente = false;
+        leiturasSaida = 0;
+
+        Serial.println("Sensor liberado");
+      }
+
+    } else {
+      leiturasSaida = 0;
+    }
+  }
+
+  // AGUARDANDO NOVO OBJETO
+  else {
+    leiturasSaida = 0;
+
+    if (distancia <= LIMITE_ENTRADA) {
+      leiturasEntrada++;
+
+      if (leiturasEntrada >= CONFIRMA_ENTRADA) {
+        contador++;
+
+        objetoPresente = true;
+        leiturasEntrada = 0;
+
+        Serial.print("OBJETO CONTADO: ");
+        Serial.println(contador);
+      }
+
+    } else {
+      leiturasEntrada = 0;
+    }
+  }
+}
+
+// =====================================
+// DADOS PARA O PAINEL
+// =====================================
+void enviarDados() {
+  String json = "{";
+
+  json += "\"contador\":";
+  json += String(contador);
+
+  json += ",\"distancia\":";
+  json += String(distancia, 1);
+
+  json += ",\"motor\":";
+  json += (motorLigado ? "true" : "false");
+
+  json += ",\"habilitado\":";
+  json += (MOTOR_HABILITADO ? "true" : "false");
+
+  json += ",\"pronto\":";
+  json += (!objetoPresente ? "true" : "false");
+
+  json += "}";
+
+  servidor.send(
+    200,
+    "application/json",
+    json
+  );
+}
+
+// =====================================
+// ZERAR CONTADOR
+// =====================================
+void zerarContador() {
+  contador = 0;
+
+  // Aguarda objeto sair antes
+  // de permitir nova contagem
+  objetoPresente = true;
+  leiturasEntrada = 0;
+  leiturasSaida = 0;
+
+  servidor.send(200, "text/plain", "OK");
+}
+
+// =====================================
+// PAGINA WEB
+// =====================================
+void paginaInicial() {
+  const char* html = R"HTML(
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+content="width=device-width,initial-scale=1">
+
+<title>Esteira Inteligente</title>
+
+<style>
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: #0f172a;
+  color: white;
+  font-family: Arial, sans-serif;
+  text-align: center;
+  margin: 0;
+  padding: 20px;
+}
+
+h1 {
+  color: #60a5fa;
+  margin-bottom: 5px;
+}
+
+.subtitulo {
+  color: #94a3b8;
+  margin-bottom: 25px;
+}
+
+.card {
+  background: #1e293b;
+  padding: 24px;
+  border-radius: 16px;
+  margin: 15px auto;
+  max-width: 420px;
+}
+
+.numero {
+  font-size: 80px;
+  font-weight: bold;
+  color: #34d399;
+  margin: 15px;
+}
+
+.valor {
+  font-size: 27px;
+  font-weight: bold;
+}
+
+.status {
+  color: #93c5fd;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  padding: 15px 20px;
+  margin: 6px;
+  color: white;
+  font-size: 17px;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #64748b;
+  cursor: not-allowed;
+}
+
+.ligar {
+  background: #16a34a;
+}
+
+.desligar {
+  background: #dc2626;
+}
+
+.zerar {
+  background: #2563eb;
+}
+
+.aviso {
+  font-size: 13px;
+  color: #fbbf24;
+}
+
+</style>
+</head>
+
+<body>
+
+<h1>Esteira Inteligente</h1>
+<p class="subtitulo">
+Sistema de contagem e controle
+</p>
+
+<div class="card">
+  <h3>PECAS CONTADAS</h3>
+
+  <div class="numero" id="contador">
+    0
+  </div>
+
+  <button class="zerar"
+    onclick="comando('/zerar')">
+    ZERAR CONTADOR
+  </button>
+</div>
+
+<div class="card">
+  <h3>SENSOR ULTRASSONICO</h3>
+
+  <p class="valor" id="distancia">
+    -- cm
+  </p>
+
+  <p class="status" id="sensor">
+    Aguardando...
+  </p>
+</div>
+
+<div class="card">
+  <h3>CONTROLE DA ESTEIRA</h3>
+
+  <p class="status" id="motor">
+    Motor desligado
+  </p>
+
+  <button class="ligar" id="botaoLigar"
+    onclick="comando('/ligar')">
+    LIGAR
+  </button>
+
+  <button class="desligar"
+    onclick="comando('/desligar')">
+    DESLIGAR
+  </button>
+
+  <p class="aviso" id="aviso"></p>
+</div>
+
+<script>
+async function comando(rota) {
+  try {
+    const resposta = await fetch(
+      rota,
+      {method: 'POST'}
+    );
+
+    const mensagem = await resposta.text();
+
+    if (!resposta.ok) {
+      alert(mensagem);
+    }
+
+    atualizar();
+
+  } catch (erro) {
+    alert('Erro de comunicacao');
+  }
+}
+
+async function atualizar() {
+  try {
+    const resposta = await fetch('/dados');
+
+    if (!resposta.ok) {
+      throw new Error('Falha');
+    }
+
+    const dados = await resposta.json();
+
+    document.getElementById('contador')
+      .innerText = dados.contador;
+
+    document.getElementById('distancia')
+      .innerText = dados.distancia < 0
+      ? 'Sem leitura'
+      : dados.distancia.toFixed(1) + ' cm';
+
+    document.getElementById('sensor')
+      .innerText = dados.pronto
+      ? 'Pronto para contar'
+      : 'Aguardando objeto sair';
+
+    document.getElementById('motor')
+      .innerText = dados.motor
+      ? 'Motor ligado'
+      : 'Motor desligado';
+
+    document.getElementById('botaoLigar')
+      .disabled = !dados.habilitado
+                  || dados.motor;
+
+    document.getElementById('aviso')
+      .innerText = dados.habilitado
+      ? ''
+      : 'Acionamento bloqueado por seguranca';
+
+  } catch (erro) {
+    document.getElementById('sensor')
+      .innerText = 'Sem comunicacao';
+  }
+}
+
+setInterval(atualizar, 500);
+atualizar();
+</script>
+
+</body>
+</html>
+)HTML";
+
+  servidor.send(200, "text/html", html);
+}
+
+// =====================================
+// SETUP
+// =====================================
+void setup() {
+  // Inicializa o motor desligado
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  desligarMotor();
+
+  Serial.begin(9600);
+
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+
+  digitalWrite(TRIG, LOW);
+
+  // Cria rede Wi-Fi
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, senha);
+
+  // Rotas web
+  servidor.on(
+    "/",
+    HTTP_GET,
+    paginaInicial
+  );
+
+  servidor.on(
+    "/dados",
+    HTTP_GET,
+    enviarDados
+  );
+
+  servidor.on(
+    "/ligar",
+    HTTP_POST,
+    ligarMotor
+  );
+
+  servidor.on(
+    "/desligar",
+    HTTP_POST,
+    comandoDesligar
+  );
+
+  servidor.on(
+    "/zerar",
+    HTTP_POST,
+    zerarContador
+  );
+
+  servidor.begin();
+
+  Serial.println();
+  Serial.println("ESTEIRA INTELIGENTE");
+  Serial.println("Wi-Fi iniciado!");
+
+  Serial.print("IP: ");
+  Serial.println(WiFi.softAPIP());
+}
+
+// =====================================
+// LOOP
+// =====================================
+void loop() {
+  servidor.handleClient();
+
+  atualizarContador();
+
+  yield();
+}
